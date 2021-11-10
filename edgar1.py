@@ -25,7 +25,7 @@ def get_year(dt):
     return dt.year
 
 def get_quarter(dt):
-    qtr = int(dt.month / 3) + 1
+    qtr = int((dt.month-1) / 3) + 1
     return qtr
 
 def get_dt_str(dt, fmt="%Y%m%d"):
@@ -80,7 +80,7 @@ def filter_forms_df(lines, form_filter=None, verbosity=0):
 def get_daily_forms(dt, form_filter=None, verbosity=0):
     if verbosity > 1:
         logger = logging.getLogger("main")
-        logger.info("{0}".format(get_fname()))
+        logger.info(f"{get_fname()}  ddir: {dt}  form_filter {form_filter}")
     year = get_year(dt)
     qtr = get_quarter(dt)
     datestr = dt.strftime("%Y%m%d")
@@ -106,6 +106,7 @@ def get_daily_forms(dt, form_filter=None, verbosity=0):
             flds = [f.strip() for f in flds if len(f) > 0]
             data.append(flds)
     df = pd.DataFrame(data, columns=["form", "company", "CIK", "date", "url"])
+    df.to_csv(f"dailyForms_{form_filter}_{datestr}.csv")
     if df.shape[0] == 0:
         msg = f"empty df for year: {year} qtr: {qtr} dt: {datestr} {url}"
         log_msg(msg, loggers=["main", "forms"])
@@ -116,7 +117,8 @@ def download_forms(formsdf, ddir, verbosity=0):
     import time
     if verbosity > 0:
         logger = logging.getLogger("main")
-        logger.info("{0}".format(get_fname()))
+        logger.info(f"{get_fname()}  ddir: {ddir}")
+
     if not os.path.isdir(ddir):
         os.mkdir(ddir)
 
@@ -194,7 +196,7 @@ def holdings_to_pandas(etree, fname, verbosity=0):
 def parse_forms(ddir, verbosity):
     if verbosity > 0:
         logger = logging.getLogger("main")
-        logger.info("{0}".format(get_fname()))
+        logger.info(f"{get_fname()}  ddir: {ddir}")
     if not os.path.isdir(ddir):
         raise(RuntimeError("ERR: no directory {ddir}"))
     txtfiles = [f for f in os.listdir(ddir) if f.endswith(".txt")]
@@ -411,16 +413,14 @@ if __name__ == "__main__":
     setup_logging()
     #test_logging()
     base = datetime.datetime.today()
-    base = datetime.datetime(2021, 10,2)
-    numdays = 8
+    #base = datetime.datetime(2021, 10,2)
+    numdays = 45
     date_list = [base - datetime.timedelta(days=x) for x in range(numdays)]
     for dt in date_list:
         weekday = dt.weekday()
         if weekday >= 5:
             continue
         ddir = dt.strftime("%Y%m%d")
-        if not os.path.isdir(ddir):
-            os.mkdir((ddir))
         for lname in ["main", "forms"]:
             logger = logging.getLogger(lname)
             logger.info(f"--{ddir}--")
