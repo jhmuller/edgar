@@ -31,11 +31,11 @@ def get_quarter(dt):
 def get_dt_str(dt, fmt="%Y%m%d"):
     return dt.strftime(fmt)
 
-def log_msg(msg, loggers=["main", "forms"], level="WARNING"):
+def log_msg(msg, loggers=["main", "forms"], level=logging.WARNING):
     try:
         for lname in loggers:
             logger = logging.getLogger(lname)
-            logger.log(msg, level=level)
+            logger.log(level, msg)
     except:
         msg = err_info()
         logger = logging.getLogger("main")
@@ -52,7 +52,7 @@ def get_url_resp(url):
     except Exception as e:
         msg = get_fname() + " "
         msg += err_info()
-        log_msg(msg, loggers=["main", "forms"], level="ERROR")
+        log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
     return resp
 
 
@@ -106,7 +106,8 @@ def get_daily_forms(dt, form_filter=None, verbosity=0):
             flds = [f.strip() for f in flds if len(f) > 0]
             data.append(flds)
     df = pd.DataFrame(data, columns=["form", "company", "CIK", "date", "url"])
-    df.to_csv(f"dailyForms_{form_filter}_{datestr}.csv")
+    df["fid"] = df["url"].apply(lambda x: os.path.splitext(x)[0].split("/")[-1])
+    df.to_csv(f"dailyForms_{form_filter}_{datestr}.csv", index=None)
     if df.shape[0] == 0:
         msg = f"empty df for year: {year} qtr: {qtr} dt: {datestr} {url}"
         log_msg(msg, loggers=["main", "forms"])
@@ -115,9 +116,13 @@ def get_daily_forms(dt, form_filter=None, verbosity=0):
 
 def download_forms(formsdf, ddir, verbosity=0):
     import time
-    if verbosity > 0:
+    if verbosity > 1:
         logger = logging.getLogger("main")
-        logger.info(f"{get_fname()}  ddir: {ddir}")
+        logger.info(f"{get_fname()}  ddir: {ddir} shape formsdf {formsdf.shape}")
+
+    if formsdf.shape[0] == 0:
+        log_msg(f"no forms for {ddir}")
+        return
 
     if not os.path.isdir(ddir):
         os.mkdir(ddir)
@@ -126,20 +131,25 @@ def download_forms(formsdf, ddir, verbosity=0):
         time.sleep(0.5)
         url = f"https://www.sec.gov/Archives/" + ser["url"]
         resp = get_url_resp(url)
+        CIK = ser["CIK"]
+        uparts = os.path.splitext(url)[0].split("/")
+        fid = uparts[len(uparts)-1]
         try:
             cname = ser["company"].replace(" ","-")
             cname = cname.replace("\\","_")
             cname = cname.replace("/","_")
+            cname = cname.replace(",","_")
             if verbosity > 0:
                 if i % 20 == 0:
                     print(f"<{i}, {cname}>")
-            fpath = os.path.join(ddir, cname+".txt")
+            fname = f"{cname}_{CIK}_{fid}.txt"
+            fpath = os.path.join(ddir, fname)
             try:
                 with open(fpath, 'wt') as fp:
                     fp.write(resp.text)
             except Exception as e1:
                 msg = get_fname() + " "
-                msg += ser["company"]
+                msg += fname
                 msg += err_info()
                 for lname in ["main", "forms"]:
                     logger = logging.getLogger(lname)
@@ -148,7 +158,7 @@ def download_forms(formsdf, ddir, verbosity=0):
             msg = get_fname() + " "
             msg += ser["company"]
             msg += err_info()
-            log_msg(msg, loggers=["main", "forms"], level="ERROR")
+            log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
     return
 
 def holdings_to_pandas(etree, fname, verbosity=0):
@@ -191,7 +201,7 @@ def holdings_to_pandas(etree, fname, verbosity=0):
     except:
         msg = f"{fname}, {get_fname()}  error processing holdings2pandas"
         msg += err_info()
-        log_msg(msg, loggers=["main", "forms"], level="ERROR")
+        log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
 
 def parse_forms(ddir, verbosity):
     if verbosity > 0:
@@ -199,10 +209,22 @@ def parse_forms(ddir, verbosity):
         logger.info(f"{get_fname()}  ddir: {ddir}")
     if not os.path.isdir(ddir):
         raise(RuntimeError("ERR: no directory {ddir}"))
+    dailydf = pd.read_csv(f"dailyForms_13_{ddir}.csv")
     txtfiles = [f for f in os.listdir(ddir) if f.endswith(".txt")]
     for ti, fname in enumerate(txtfiles):
         if verbosity > 1:
             print(f"{ti}, {fname}")
+        try:
+            fparts = os.path.splitext(fname)[0].split("_")
+            CIK = fparts[len(fparts)-2]
+            CIK = int(CIK)
+            fid = fparts[len(fparts)-1]
+            cdf = dailydf.loc[dailydf["CIK"] == CIK]
+            entry = cdf.loc[cdf["fid"] == fid]
+        except:
+            msg = f"{fname}, {get_fname()}  error parsing"
+            msg += err_info()
+            log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
         fpath = os.path.join(ddir, fname)
         try:
             with open(fpath, "r") as fp:
@@ -217,13 +239,14 @@ def parse_forms(ddir, verbosity):
                 logger.warning(f"{fname}, empty dataframe from parse_form ")
                 continue
             else:
-                csvname = os.path.splitext(fname)[0] + ".csv"
+
+                csvname = os.path.splitext(fname)[0] + "_" + str(CIK) + "_" + str(fid) + ".csv"
                 csvpath = os.path.join(ddir, csvname)
-                hdf.to_csv(csvpath)
+                hdf.to_csv(csvpath, index=None)
         except Exception as e:
             msg = f"{fname}, {get_fname()}  error parsing"
             msg += err_info()
-            log_msg(msg, loggers=["main", "forms"], level="ERROR")
+            log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
     return
 
 def fixup(html, fname, verbosity=0):
@@ -265,7 +288,7 @@ def fixup(html, fname, verbosity=0):
     except:
         msg = f"{get_fname()}  error parsing"
         msg += err_info()
-        log_msg(msg, loggers=["main", "forms"], level="ERROR")
+        log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
         return None
 
 def notused():
@@ -288,7 +311,7 @@ def notused():
             logger = logging.getLogger("main")
             logger.info("df.shape really big")
         df["next"] = "ok"
-        if verbosity > 0:
+        if verbosity > 1:
             msg = "  {0} df shape {1}".format(get_fname(), df.shape)
             msg += "  {0} iterating df rows".format(get_fname())
             logger = logging.getLogger("main")
@@ -357,7 +380,7 @@ def parse_form(html, fname, verbosity=0):
             fp.write(html2)
         msg = f"{get_fname()}  error iterparse"
         msg += err_info()
-        log_msg(msg, loggers=["main", "forms"], level="ERROR")
+        log_msg(msg, loggers=["main", "forms"], level=logging.ERROR)
         return None
 
 
@@ -413,8 +436,8 @@ if __name__ == "__main__":
     setup_logging()
     #test_logging()
     base = datetime.datetime.today()
-    #base = datetime.datetime(2021, 10,2)
-    numdays = 45
+    base = datetime.datetime(2021, 9, 10)
+    numdays = 60
     date_list = [base - datetime.timedelta(days=x) for x in range(numdays)]
     for dt in date_list:
         weekday = dt.weekday()
@@ -426,8 +449,9 @@ if __name__ == "__main__":
             logger.info(f"--{ddir}--")
         try:
             formsdf = get_daily_forms(dt, form_filter='13', verbosity=verbosity)
-            download_forms(formsdf, ddir=ddir, verbosity=verbosity)
-            parse_forms(ddir=ddir, verbosity=1)
+            if formsdf.shape[0] > 0:
+                download_forms(formsdf, ddir=ddir, verbosity=verbosity)
+                parse_forms(ddir=ddir, verbosity=1)
         except Exception as e:
             print(err_info())
     print("done {0}".format(datetime.datetime.now()))
