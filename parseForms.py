@@ -219,7 +219,10 @@ if __name__ == "__main__":
     Utilities.setup_logging(outLogName=outLogName, errLogName=errLogName)
     basedir = "./data"
     ddirs = [x for x in os.listdir(basedir) if os.path.isdir(os.path.join(basedir,x))]
+    ddirs = sorted(ddirs, reverse=True)
     for ddir in ddirs:
+        if ddir < '20211110':
+            break
         for lname in [outLogName, errLogName]:
             logger = logging.getLogger(lname)
             logger.info(f"--{ddir}--")

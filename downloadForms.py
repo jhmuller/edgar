@@ -351,7 +351,7 @@ if __name__ == "__main__":
     base = datetime.datetime.today()
     #base = datetime.datetime(2021, 3, 4)
 
-    numdays = 2
+    numdays = 3
     basedir = "data"
     date_list = [base - datetime.timedelta(days=x) for x in range(numdays)]
     for dt in date_list:
