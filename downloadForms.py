@@ -142,12 +142,16 @@ def filter_forms_df(lines,  outLogName, errLogName, form_filter=None, verbosity=
     df = pd.DataFrame(data, columns=["form", "company", "CIK", "date", "url"])
     return df
 
-def get_daily_forms(dt, basedir, outLogName, errLogName, maxTries=4, form_filter=None, verbosity=0):
+def get_daily_forms(dt, basedir, outLogName, errLogName, maxTries=4,
+
+                    verbosity=0):
+    import xml.etree.ElementTree as ET
     if verbosity > 0:
         logger = logging.getLogger(outLogName)
-        logger.info(f"{get_fname()}  ddir: {dt}  form_filter {form_filter}")
+        logger.info(f"{get_fname()}  ddir: {dt}  ")
     try:
-        year = get_year(dt)
+        year = dt.year
+        month = dt.month
         qtr = get_quarter(dt)
         datestr = dt.strftime("%Y%m%d")
         url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{qtr}/form.{datestr}.idx"
@@ -158,7 +162,15 @@ def get_daily_forms(dt, basedir, outLogName, errLogName, maxTries=4, form_filter
                 break
             cnt += 1
             resp = get_url_resp(url, outLogName=outLogName, errLogName=errLogName)
+        if resp == None:
+            msg = get_fname() + f" tried {maxTries} times, no response"
+            log_msg(msg, loggers=[outLogName, errLogName], level=logging.WARNING)
+            return None
         lines = resp.text.split("\n")
+        if len(lines) <= 2:
+            return
+        with open(os.path.join(basedir, f"resp_text.text"), "w") as fp:
+            fp.write(resp.text)
     except:
         msg = get_fname() + " "
         msg += err_info()
@@ -173,31 +185,31 @@ def get_daily_forms(dt, basedir, outLogName, errLogName, maxTries=4, form_filter
         for li, line in enumerate(lines):
             if verbosity > 2:
                 print("skippling line {0}: {1}".format(li, line))
-            if line.startswith("Form"):
+            if line.startswith("----"):
                 break
         data = []
         segments = [(0,12), (12,74), (74,86), (86,98), (98,142)]
         for i, line in enumerate(lines[li+1:]):
             if verbosity > 2:
                 print(f"line {i}:  {line}")
-            if form_filter and line.startswith(form_filter):
-                flds = []
-                for start, end in segments:
-                    fld = line[start:end]
-                    flds.append(fld.strip())
-                #flds = re.split("\s\s+", line)
-                #flds = [f.strip() for f in flds if len(f) > 0]
-                data.append(flds)
+            flds = []
+            for start, end in segments:
+                fld = line[start:end]
+                flds.append(fld.strip())
+            data.append(flds)
         df = pd.DataFrame(data, columns=["form", "company", "CIK", "date", "url"])
         if df.shape[0] == 0:
             msg = "Empty dataframe"
             log_msg(msg=msg, level=logging.WARNING, loggers=[outLogName, errLogName])
             return df
         df["fid"] = df["url"].apply(lambda x: os.path.splitext(x)[0].split("/")[-1])
-        fname = f"dailyForms_{form_filter}_{datestr}.csv"
-        if not os.path.isdir(basedir):
-            os.mkdir(basedir)
-        fpath = os.path.join(basedir, fname)
+        fname = f"secFilings_{datestr}.csv"
+
+        savedir = os.path.join(basedir, str(year), str(month))
+
+        if not os.path.isdir(savedir):
+            os.makedirs(savedir)
+        fpath = os.path.join(savedir, fname)
         df.to_csv(fpath, index=None)
         if df.shape[0] == 0:
             msg = f"empty df for year: {year} qtr: {qtr} dt: {datestr} {url}"
@@ -248,24 +260,25 @@ def parallel_download(formsdf, basedir, ddir, outLogName, errLogName, ncpu=None,
                 ndone += 1
     return
 
-def download_forms(formsdf, basedir,  ddir, outLogName, errLogName, verbosity=0):
+def download_forms(formsdf, basedir,  year, month, day, outLogName, errLogName,  incl_filter=None,
+                    excl_filter=None, verbosity=0):
     import time
     if verbosity > 0:
         logger = logging.getLogger(outLogName)
-        logger.info(f"<{get_fname()}>  ddir: {ddir} shape formsdf {formsdf.shape}  {now()}")
+        logger.info(f"<{get_fname()}>  {year}-{month}-{day} shape formsdf {formsdf.shape}  {now()}")
         logger.info(f"  pid: {os.getpid()}  thread id {threading.get_ident()}")
     if formsdf.shape[0] == 0:
         log_msg(msg=f"no forms for {ddir}", level=logging.INFO)
         return
 
-    savedir = os.path.join(basedir, ddir)
-    if not os.path.isdir(savedir):
-        os.mkdir(savedir)
-
     for i, (idx, ser) in enumerate(formsdf.iterrows()):
-        time.sleep(0.5)
+        if incl_filter and not re.search(incl_filter, ser["form"]) :
+            continue
+        if excl_filter and re.search(excl_filter, ser["form"]) :
+            continue
         url = f"https://www.sec.gov/Archives/" + ser["url"]
         try:
+            time.sleep(0.15)
             resp = get_url_resp(url, outLogName=outLogName, errLogName=errLogName)
         except requests.exceptions.ConnectionError:
             msg = "ConnectionError: "
@@ -282,13 +295,23 @@ def download_forms(formsdf, basedir,  ddir, outLogName, errLogName, verbosity=0)
         fid = uparts[len(uparts)-1]
         try:
             cname = ser["company"].replace(" ","-")
-            cname = cname.replace("\\","_")
-            cname = cname.replace("/","_")
-            cname = cname.replace(",","_")
+            cname = cname.replace("\\","-")
+            cname = cname.replace("/","-")
+            cname = cname.replace(",","-")
+            cname = cname.replace("_","-")
+
             if verbosity > 0:
                 if i % 20 == 0:
                     print(f"<{i}, {cname}>")
-            fname = f"{cname}_{CIK}_{fid}.txt"
+
+
+            form = ser["form"]
+            formdir = re.sub("\\\\|/", "_", ser["form"])
+            savedir = os.path.join(basedir, str(year), str(month), str(day), formdir)
+            if not os.path.isdir(savedir):
+                os.makedirs(savedir)
+
+            fname = f"{cname}_CIK{CIK}_FID{fid}.txt"
             fpath = os.path.join(savedir, fname)
             try:
                 with open(fpath, 'wt') as fp:
@@ -349,9 +372,9 @@ if __name__ == "__main__":
     setup_logging(outLogName=outLogName, errLogName=errLogName)
     loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
     base = datetime.datetime.today()
-    #base = datetime.datetime(2021, 3, 4)
+    base = datetime.datetime(2021, 9, 8)
 
-    numdays = 3
+    numdays = 20
     basedir = "data"
     date_list = [base - datetime.timedelta(days=x) for x in range(numdays)]
     for dt in date_list:
@@ -359,17 +382,20 @@ if __name__ == "__main__":
         if weekday >= 5:
             pass
         ddir = dt.strftime("%Y%m%d")
+        year = dt.year
+        month = dt.month
+        day = dt.day
         for lname in ["main", "forms"]:
             logger = logging.getLogger(lname)
             logger.info(f"--{ddir}--")
         try:
-            formsdf = get_daily_forms(dt, basedir=basedir, form_filter='13',
+            formsdf = get_daily_forms(dt, basedir=basedir,
                                       outLogName= outLogName, errLogName=errLogName, verbosity=verbosity)
             if not isinstance(formsdf, pd.DataFrame):
                 msg = f" dt {dt} formsdf not a dataframe"
                 log_msg(msg=msg, level=logging.WARNING, loggers = [outLogName, errLogName])
             if formsdf.shape[0] > 0:
-                download_forms(formsdf, basedir, ddir,
+                download_forms(formsdf, basedir, year, month, day, incl_filter='13F', excl_filter=None,
                                outLogName=outLogName, errLogName=errLogName, verbosity=verbosity)
         except Exception as e:
             print(err_info())

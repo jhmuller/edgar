@@ -1,12 +1,14 @@
-
 import os
 import datetime
 import re
 import psutil
+from pathlib import PurePath
 import pandas as pd
 import logging
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import threading
+import xml.etree.ElementTree as ET
+import io
 from utilities import Utilities
 
 def holdings_to_pandas(etree, fname, outLogName, errLogName, verbosity=0):
@@ -38,7 +40,7 @@ def holdings_to_pandas(etree, fname, outLogName, errLogName, verbosity=0):
         for lname in [outLogName, errLogName]:
             logger = logging.getLogger(lname)
             logger.warning(msg)
-        return None
+        return df
     try:
         ncols = ["value", "sshPrnamt", "Sole", "Shared", "None"]
         for ncol in ncols:
@@ -54,13 +56,15 @@ def holdings_to_pandas(etree, fname, outLogName, errLogName, verbosity=0):
         Utilities.log_msg(msg, loggers=[outLogName, errLogName], level=logging.ERROR)
 
 
-def parallel_parse(basedir, ddir,  outLogName, errLogName, ncpu=None, verbosity=0):
+def parallel_parse(sdir, outLogName, errLogName, ncpu=None, verbosity=0):
+    if verbosity > 0:
+        logger = logging.getLogger(outLogName)
+        logger.info(f"{Utilities.get_fname()}  ddir: {sdir}  {Utilities.now()}")
+
     if ncpu is None:
         ncpu = psutil.cpu_count()
-    fdir = os.path.join(basedir, ddir)
-    if not os.path.isdir(fdir):
-        os.makedirs(fdir)
-    txtfiles = [f for f in os.listdir(fdir) if f.endswith(".txt")]
+
+    txtfiles = [f for f in os.listdir(sdir) if f.endswith(".txt")]
     nrows = 20
     start = 0
     end = nrows
@@ -69,21 +73,23 @@ def parallel_parse(basedir, ddir,  outLogName, errLogName, ncpu=None, verbosity=
     func = parse_forms
     pool_executor = ProcessPoolExecutor
     fi = 0
+    files = {}
     with pool_executor(max_workers=ncpu) as executor:
         while start < len(txtfiles):
             try:
-                print(start)
-                files = txtfiles[start:end]
-                future =  executor.submit(func, txtfiles=txtfiles[start:end], basedir=basedir, ddir=ddir, verbosity=verbosity,
+                #print(start)
+                files[fi] = txtfiles[start:end]
+                future =  executor.submit(func, txtfiles=files[fi], sdir=sdir, verbosity=verbosity,
                                           outLogName=outLogName, errLogName=errLogName)
                 futures.append(future)
                 ranges.append((start, end))
-                print(len(futures), start, end)
+                #print(len(futures), start, end)
                 start = end
                 end = min(end+nrows, len(txtfiles))
+                fi += 1
             except:
                 msg = Utilities.err_info()
-                Utilities.log_msg(level=logging.ERROR, msg=msg)
+                Utilities.log_msg(level=logging.ERROR, loggers=[executor, outLogName], msg=msg)
     ndone = 0
     while ndone < len(futures):
         ndone = 0
@@ -94,42 +100,82 @@ def parallel_parse(basedir, ddir,  outLogName, errLogName, ncpu=None, verbosity=
                 ndone += 1
     return
 
-def parse_forms(basedir, ddir, outLogName, errLogName,
-                txtfiles=None, verbosity=0, files=None):
+def parse_forms(sdir, outLogName, errLogName,
+                txtfiles, verbosity=0, files=None):
     if verbosity > 0:
         logger = logging.getLogger(outLogName)
-        logger.info(f"{Utilities.get_fname()}  ddir: {ddir}  basedir {basedir} {Utilities.now()}")
-        logger.info(f"  pid: {os.getpid()}  threadid: {threading.get_ident()}")
-    fdir = os.path.join(basedir, ddir)
-    if not os.path.isdir(fdir):
-        os.makedirs(fdir)
-    if txtfiles is None:
-        txtfiles = [f for f in os.listdir(fdir) if f.endswith(".txt")]
+        msg = f"{Utilities.get_fname()}  ddir: {sdir}  {Utilities.now()}"
+        msg += f"  pid: {os.getpid()}  threadid: {threading.get_ident()}"
+        msg += txtfiles[0]
+        print(msg)
+
     # the daily file is in basedir
     # but the txt files are in basedir/ddir or fdir
     # confusing!
-    dailydf = pd.read_csv(os.path.join(basedir, f"dailyForms_13_{ddir}.csv"))
-
+    ppath = PurePath(sdir)
+    pparts = ppath.parts
+    year, month, day = pparts[1:4]
+    month = month.zfill(2)
+    day = day.zfill(2)
+    tparts = list(pparts[:3]) + [f"secFilings_{year}{month}{day}.csv"]
+    tpath = PurePath(*tparts)
+    if not os.path.isfile(tpath):
+        msg = f"can't find {tpath}"
+        Utilities.log_msg(msg=msg, loggers=[errLogName, outLogName], level=logging.INFO)
+        return -1
+    dailydf = pd.read_csv(tpath)
     for ti, fname in enumerate(txtfiles):
         if verbosity > 1:
             msg = f"{ti}, {fname}"
-            Utilities.log_msg(msg=msg, level=logging.INFO)
+            Utilities.log_msg(msg=msg, loggers=[errLogName, outLogName], level=logging.INFO)
         try:
             fparts = os.path.splitext(fname)[0].split("_")
-            CIK = fparts[len(fparts)-2]
+            CIK = fparts[len(fparts)-2][3:]
             CIK = int(CIK)
-            fid = fparts[len(fparts)-1]
+            fid = fparts[len(fparts)-1][3:]
             cdf = dailydf.loc[dailydf["CIK"] == CIK]
             entry = cdf.loc[cdf["fid"] == fid]
         except:
             msg = f"{fname}, {Utilities.get_fname()}  error parsing"
             msg += Utilities.err_info()
             Utilities.log_msg(msg, loggers=[outLogName, errLogName], level=logging.ERROR)
-        fpath = os.path.join(basedir, ddir, fname)
+        fpath = os.path.join(sdir, fname)
         try:
             with open(fpath, "r") as fp:
-                data = fp.read()
-            hdf = parse_form(data, fname=fname, outLogName=outLogName, errLogName=errLogName, verbosity=verbosity)
+                html_orig = fp.read()
+            html_fixed = fixup(html_orig, outLogName, errLogName, verbosity=verbosity)
+            outname = os.path.splitext(fname)[0]+ "_fixed.txt"
+            outpath = os.path.join(sdir,  outname)
+            with open(outpath, "w") as fp:
+                fp.write(html_fixed)
+            def extract_key_values(text, keys=None, sep=":"):
+                res = {}
+                for key in keys:
+                    realkey = "("+key+sep+")"+"(.*)(\n)"
+                    match = re.search(realkey, text)
+                    if match:
+                        value = match.group(2).strip()
+                        res[key] = value
+                return res
+            hdf = parse_form(html_fixed, fname=fname, outLogName=outLogName, errLogName=errLogName, verbosity=verbosity)
+            if not isinstance(hdf, pd.DataFrame) or hdf.shape[0] == 0:
+                continue
+
+            keys = ["ACCEPTANCE-DATETIME", "STATE", "CITY"]
+            keyvals = extract_key_values(html_fixed, keys=keys)
+            hdf["year"] = int(year)
+            hdf["month"] = int(month)
+            hdf["day"] = int(day)
+            hdf["filingDt"] = datetime.datetime(int(year), int(month), int(day))
+            try:
+                key = "ACCEPTANCE-DATETIME"
+                filingDt = datetime.datetime.strptime(keyvals[key], "%Y%m%d%H%M%S")
+                hdf["filingDt"] = filingDt
+            except:
+                key = "ACCEPTANCE-DATETIME"
+                msg = f" bad Acceptance-datetime {keyvals[key]}"
+                Utilities.log_msg(msg=msg, loggers=[errLogName, outLogName], level=logging.WARNING)
+
             if not isinstance(hdf, pd.DataFrame):
                 logger = logging.getLogger("forms")
                 logger.warning(f"{fname}, None from parse_form")
@@ -139,9 +185,10 @@ def parse_forms(basedir, ddir, outLogName, errLogName,
                 logger.warning(f"{fname}, empty dataframe from parse_form ")
                 continue
             else:
-
                 csvname = os.path.splitext(fname)[0] + "_" + str(CIK) + "_" + str(fid) + ".csv"
-                csvpath = os.path.join(basedir, ddir, csvname)
+                csvpath = os.path.join(sdir, csvname)
+                if verbosity > 0:
+                    print(csvpath)
                 hdf.to_csv(csvpath, index=None)
         except Exception as e:
             msg = f"{fname}, {Utilities.get_fname()}  error parsing"
@@ -149,16 +196,15 @@ def parse_forms(basedir, ddir, outLogName, errLogName,
             Utilities.log_msg(msg, loggers=[outLogName, errLogName], level=logging.ERROR)
     return
 
-def fixup(html, fname, outLogName, errLogName, verbosity=0):
+def fixup(html, outLogName, errLogName, verbosity=0):
     if verbosity > 1:
         logger = logging.getLogger(outLogName)
-        logger.info("{0} {1}".format(Utilities.get_fname(), fname))
+        logger.info("{0} {1}".format(Utilities.get_fname()))
 
     try:
         # this string does not have closing tag
         if verbosity > 1:
             logger.info("  {0} replacing texts".format(Utilities.get_fname()))
-        html = html.replace("<ACCEPTANCE-DATETIME>", "ACCEPTANCE-DATETIME")
         html = re.sub("<\?xml.*\?>", "", html)
         html = re.sub("&", "and", html)
         html = re.sub("<ACCEPTANCE-DATETIME>", "ACCEPTANCE-DATETIME: ", html)
@@ -194,19 +240,17 @@ def fixup(html, fname, outLogName, errLogName, verbosity=0):
 def parse_form(html, fname, outLogName, errLogName, verbosity=0):
     if verbosity > 1:
         logger = logging.getLogger(outLogName)
-        logger.info("{0} {1}".format(Utilities.get_fname(), fname))
-    import xml.etree.ElementTree as ET
-    import io
-    html2 = fixup(html, fname, outLogName=outLogName, errLogName=errLogName, verbosity=verbosity)
+        logger.info("{0} {1}".format(Utilities.get_fname()))
+
     try:
-        lines = html2.split("\n")
-        xml_data = io.StringIO(html2)
+        lines = html.split("\n")
+        xml_data = io.StringIO(html)
         etree = ET.parse(xml_data)  # create an ElementTree object
         df = holdings_to_pandas(etree, fname, outLogName=outLogName, errLogName=errLogName, verbosity=verbosity)
         return df
     except Exception as e:
         with open("html2.txt", 'w') as fp:
-            fp.write(html2)
+            fp.write(html)
         msg = f"{Utilities.get_fname()}  error iterparse"
         msg += Utilities.err_info()
         Utilities.log_msg(msg, loggers=[outLogName, errLogName], level=logging.ERROR)
@@ -214,20 +258,23 @@ def parse_form(html, fname, outLogName, errLogName, verbosity=0):
 
 if __name__ == "__main__":
     verbosity = 1
-    outLogName = "dnldOut"
-    errLogName = "dnldErr"
+    outLogName = "parseOut"
+    errLogName = "parseErr"
     Utilities.setup_logging(outLogName=outLogName, errLogName=errLogName)
     basedir = "./data"
-    ddirs = [x for x in os.listdir(basedir) if os.path.isdir(os.path.join(basedir,x))]
-    ddirs = sorted(ddirs, reverse=True)
-    for ddir in ddirs:
-        if ddir < '20211110':
-            break
+    sdirs = Utilities.sub_dirs_with_files(basedir, fname_incl=".txt")
+    # for now only 13F files
+    sdirs = [x for x in sdirs if re.search("13F", x)]
+    sdirs = sorted(sdirs)
+    for sdir in sdirs:
+        ppath = PurePath(sdir)
+        pparts = ppath.parts
+        print(pparts)
         for lname in [outLogName, errLogName]:
             logger = logging.getLogger(lname)
-            logger.info(f"--{ddir}--")
+            logger.info(f"--{sdir}--")
         try:
-            parallel_parse(basedir=basedir, ddir=ddir, outLogName=outLogName,
+            parallel_parse(sdir=sdir, outLogName=outLogName,
                            errLogName=errLogName, verbosity=1, ncpu=None)
         except Exception as e:
             print(Utilities.err_info())

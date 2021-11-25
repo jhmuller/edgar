@@ -1,4 +1,7 @@
 import sys
+import os
+import re
+import collections
 import datetime
 import logging
 
@@ -42,6 +45,25 @@ class Utilities(object):
         return dt.strftime(fmt)
 
     @staticmethod
+    def sub_dirs_with_files(ddir, fname_incl=None):
+        from collections import deque
+        import re
+        res = []
+        que = deque()
+        que.appendleft(ddir)
+        while len(que) > 0:
+            popdir = que.pop()
+            alls = [x for x in os.listdir(popdir)]
+            files = [f for f in alls if os.path.isfile(os.path.join(popdir, f))]
+            if fname_incl:
+                files = [x for x in files if re.search(fname_incl, x)]
+            if len(files) > 0:
+                res.append(popdir)
+            dirs = [os.path.join(popdir, x) for x in alls if os.path.isdir(os.path.join(popdir, x))]
+            que.extend(dirs)
+        return res
+
+    @staticmethod
     def log_msg(msg, loggers, level=logging.WARNING):
         try:
             if not isinstance(loggers, list) or not isinstance(loggers, tuple):
@@ -56,15 +78,16 @@ class Utilities(object):
         return
 
     @staticmethod
-    def setup_logging(outLogName="dnldOut", errLogName="dnldErr"):
+    def setup_logging(outLogName="dnldOut", errLogName="dnldErr",
+                      outLevel=logging.INFO, errLevel=logging.ERROR):
         dt = datetime.datetime.now()
         outLogfilename = outLogName + "_" + dt.strftime("%Y%m%d") + ".log"
         errLogfilename = errLogName + dt.strftime("%Y%m%d") + ".log"
         outLogger = logging.getLogger(outLogName)
         errLogger = logging.getLogger(errLogName)
 
-        outLogger.setLevel(logging.DEBUG)
-        errLogger.setLevel(logging.ERROR)
+        outLogger.setLevel(outLevel)
+        errLogger.setLevel(errLevel)
 
         # create file handler which logs even debug messages
         errFh = logging.FileHandler(errLogfilename)
